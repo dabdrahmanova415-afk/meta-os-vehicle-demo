@@ -1,21 +1,12 @@
 /*
- * Meta-OS for Vehicle Demonstrator
- * Arduino Uno + FreeRTOS + Encoder + Servo + LEDs
- * 
- * Modes: NORMAL (green), ECO (yellow), SAFE (red)
- * - Encoder controls servo angle (throttle simulation)
- * - Button triggers SAFE mode (brake simulation)
- * - Battery discharges over time, switching to ECO at 20%
- * - Non-critical task is suspended in ECO/SAFE to save energy
- * - CSV data output over Serial for analysis
+ * Meta-OS for Vehicle Demonstrator — FIXED BUTTON & LEDS
+ * Arduino Uno + Encoder + Servo + LEDs + Button
  */
 
-#include <Arduino_FreeRTOS.h>
-#include <task.h>
 #include <Servo.h>
 #include <Encoder.h>
 
-// Pin definitions
+// ========== PIN DEFINITIONS ==========
 #define ENC_CLK 11
 #define ENC_DT  12
 #define PIN_BRAKE 2
@@ -24,139 +15,34 @@
 #define PIN_LED_SAFE 8   // Red
 #define PIN_SERVO 9
 
-// Objects
+// ========== OBJECTS ==========
 Servo throttleServo;
 Encoder myEncoder(ENC_CLK, ENC_DT);
 
-// Global variables
-volatile int servoAngle = 90;
-volatile bool brakePressed = false;
-volatile int systemMode = 0;        // 0=NORMAL, 1=ECO, 2=SAFE
-volatile int simulatedBattery = 100; // percent
-volatile long lastEncoderPos = 0;
+// ========== GLOBAL VARIABLES ==========
+int servoAngle = 90;
+bool brakePressed = false;
+int systemMode = 0;        // 0=NORMAL, 1=ECO, 2=SAFE
+int simulatedBattery = 100;
+long lastEncoderPos = 0;
 
-// Task handles
-TaskHandle_t criticalHandle = NULL;
-TaskHandle_t nonCriticalHandle = NULL;
-TaskHandle_t metaHandle = NULL;
+// For timing
+unsigned long lastBatteryTime = 0;
+unsigned long lastSerialTime = 0;
+unsigned long lastEncoderCheck = 0;
 
-// ----------------------------------------------------------------------
-// Critical task (highest priority, 10ms period)
-// Reads encoder and brake, controls servo
-// ----------------------------------------------------------------------
-void vCriticalTask(void *pvParameters) {
-  TickType_t xLastWakeTime = xTaskGetTickCount();
-  
-  for (;;) {
-    // Read encoder position
-    long newPos = myEncoder.read();
-    if (newPos != lastEncoderPos) {
-      int delta = (newPos - lastEncoderPos) * 2;
-      servoAngle += delta;
-      servoAngle = constrain(servoAngle, 0, 180);
-      lastEncoderPos = newPos;
-    }
-    
-    // Read brake button (LOW when pressed due to INPUT_PULLUP)
-    brakePressed = (digitalRead(PIN_BRAKE) == LOW);
-    
-    // Servo control logic with mode priorities
-    if (brakePressed || systemMode == 2) {
-      throttleServo.write(0);                    // SAFE: full stop
-    } 
-    else if (systemMode == 1) {
-      int limited = constrain(servoAngle, 0, 90); // ECO: 50% limit
-      throttleServo.write(limited);
-    } 
-    else {
-      throttleServo.write(servoAngle);            // NORMAL: full range
-    }
-    
-    vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(10));
-  }
-}
+// For button debounce
+unsigned long lastButtonCheck = 0;
+bool lastButtonState = false;
 
-// ----------------------------------------------------------------------
-// Non-critical task (lowest priority, 100ms period)
-// Simulates sensor polling, can be suspended in ECO/SAFE
-// ----------------------------------------------------------------------
-void vNonCriticalTask(void *pvParameters) {
-  TickType_t xLastWakeTime = xTaskGetTickCount();
-  
-  for (;;) {
-    // Simulate temperature reading
-    int fakeTemp = random(20, 35);
-    
-    // CSV output (time from scheduler, mode, angle, battery, brake)
-    Serial.print(millis());
-    Serial.print(",");
-    Serial.print(systemMode);
-    Serial.print(",");
-    Serial.print(servoAngle);
-    Serial.print(",");
-    Serial.print(simulatedBattery);
-    Serial.print(",");
-    Serial.println(brakePressed ? 1 : 0);
-    
-    vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(100));
-  }
-}
-
-// ----------------------------------------------------------------------
-// Meta-OS task (medium priority, 50ms period)
-// Monitors battery, switches modes, controls LEDs, suspends non-critical task
-// ----------------------------------------------------------------------
-void vMetaOSTask(void *pvParameters) {
-  TickType_t xLastWakeTime = xTaskGetTickCount();
-  int batteryCounter = 0;
-  
-  for (;;) {
-    // Simulate battery discharge (1% every 2 seconds)
-    if (++batteryCounter >= 40) {
-      batteryCounter = 0;
-      if (simulatedBattery > 0 && systemMode != 2) {
-        simulatedBattery--;
-      }
-    }
-    
-    // Mode switching logic
-    if (brakePressed) {
-      systemMode = 2;                           // SAFE
-    }
-    else if (simulatedBattery <= 20) {
-      systemMode = 1;                           // ECO
-    }
-    else {
-      systemMode = 0;                           // NORMAL
-    }
-    
-    // LED indicators
-    digitalWrite(PIN_LED_NORM, (systemMode == 0) ? HIGH : LOW);
-    digitalWrite(PIN_LED_ECO,  (systemMode == 1) ? HIGH : LOW);
-    digitalWrite(PIN_LED_SAFE, (systemMode == 2) ? HIGH : LOW);
-    
-    // Suspend or resume non-critical task based on mode
-    if (nonCriticalHandle != NULL) {
-      if (systemMode == 1 || systemMode == 2) {
-        vTaskSuspend(nonCriticalHandle);
-      } else {
-        vTaskResume(nonCriticalHandle);
-      }
-    }
-    
-    vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(50));
-  }
-}
-
-// ----------------------------------------------------------------------
-// Setup
-// ----------------------------------------------------------------------
+// ========== SETUP ==========
 void setup() {
   Serial.begin(115200);
   delay(1000);
   
-  // Print CSV header
-  Serial.println("Time_ms,Mode,Angle,Battery,Brake");
+  Serial.println("=========================================");
+  Serial.println("META-OS VEHICLE DEMONSTRATOR - FIXED");
+  Serial.println("=========================================");
   
   // Pin configuration
   pinMode(PIN_BRAKE, INPUT_PULLUP);
@@ -173,15 +59,123 @@ void setup() {
   throttleServo.attach(PIN_SERVO);
   throttleServo.write(90);
   
-  // Create FreeRTOS tasks
-  xTaskCreate(vCriticalTask, "Critical", 256, NULL, 3, &criticalHandle);
-  xTaskCreate(vNonCriticalTask, "NonCritical", 256, NULL, 1, &nonCriticalHandle);
-  xTaskCreate(vMetaOSTask, "MetaOS", 256, NULL, 2, &metaHandle);
-  
-  // Start scheduler
-  vTaskStartScheduler();
+  Serial.println("Ready:");
+  Serial.println("  - Turn encoder → servo moves");
+  Serial.println("  - Press button (pin2) → SAFE mode (red LED)");
+  Serial.println("  - Wait ~80 sec → ECO mode (yellow LED)");
+  Serial.println("=========================================");
 }
 
+// ========== MAIN LOOP ==========
 void loop() {
-  // Empty — FreeRTOS takes over
+  unsigned long now = millis();
+  
+  // ========== 1. READ ENCODER (every 10ms) ==========
+  if (now - lastEncoderCheck >= 10) {
+    lastEncoderCheck = now;
+    
+    long newPos = myEncoder.read();
+    if (newPos != lastEncoderPos) {
+      int delta = (newPos - lastEncoderPos) * 1;
+      servoAngle += delta;
+      servoAngle = constrain(servoAngle, 0, 180);
+      lastEncoderPos = newPos;
+    }
+  }
+  
+  // ========== 2. READ BRAKE BUTTON (with debounce, every 20ms) ==========
+  if (now - lastButtonCheck >= 20) {
+    lastButtonCheck = now;
+    
+    // Read button (LOW = pressed due to INPUT_PULLUP)
+    bool rawButton = (digitalRead(PIN_BRAKE) == LOW);
+    
+    // Simple debounce: only change if state is stable
+    if (rawButton != lastButtonState) {
+      // Wait a bit and re-check
+      delay(5);
+      bool confirm = (digitalRead(PIN_BRAKE) == LOW);
+      if (confirm == rawButton) {
+        brakePressed = rawButton;
+        lastButtonState = rawButton;
+        
+        // Debug output
+        if (brakePressed) {
+          Serial.println("BUTTON PRESSED → SAFE MODE");
+        } else {
+          Serial.println("BUTTON RELEASED");
+        }
+      }
+    }
+  }
+  
+  // ========== 3. SIMULATE BATTERY DISCHARGE (every 2 seconds) ==========
+  if (now - lastBatteryTime >= 2000) {
+    lastBatteryTime = now;
+    if (simulatedBattery > 0 && systemMode != 2) {
+      simulatedBattery--;
+      
+      // Debug when battery gets low
+      if (simulatedBattery == 20) {
+        Serial.println("BATTERY LOW (20%) → ECO MODE SOON");
+      }
+    }
+  }
+  
+  // ========== 4. MODE SWITCHING LOGIC ==========
+  int newMode = systemMode;
+  
+  if (brakePressed) {
+    newMode = 2;                           // SAFE
+  }
+  else if (simulatedBattery <= 20) {
+    newMode = 1;                           // ECO
+  }
+  else {
+    newMode = 0;                           // NORMAL
+  }
+  
+  // Update LEDs ALWAYS based on current mode (not only on change)
+  digitalWrite(PIN_LED_NORM, (newMode == 0) ? HIGH : LOW);
+  digitalWrite(PIN_LED_ECO,  (newMode == 1) ? HIGH : LOW);
+  digitalWrite(PIN_LED_SAFE, (newMode == 2) ? HIGH : LOW);
+  
+  // If mode actually changed, print to Serial
+  if (newMode != systemMode) {
+    systemMode = newMode;
+    
+    Serial.print("MODE CHANGE: ");
+    if (systemMode == 0) Serial.println("NORMAL (green LED)");
+    else if (systemMode == 1) Serial.println("ECO (yellow LED) — throttle limited to 90°");
+    else Serial.println("SAFE (red LED) — servo stopped");
+  } else {
+    systemMode = newMode;  // still update systemMode even if no change
+  }
+  
+  // ========== 5. CONTROL SERVO (with mode priorities) ==========
+  if (brakePressed || systemMode == 2) {
+    throttleServo.write(0);                    // SAFE: full stop
+  } 
+  else if (systemMode == 1) {
+    int limited = constrain(servoAngle, 0, 90); // ECO: 50% limit
+    throttleServo.write(limited);
+  } 
+  else {
+    throttleServo.write(servoAngle);            // NORMAL: full range
+  }
+  
+  // ========== 6. CSV OUTPUT (every 100ms) ==========
+  if (now - lastSerialTime >= 100) {
+    lastSerialTime = now;
+    
+    Serial.print(now);
+    Serial.print(",");
+    Serial.print(systemMode);
+    Serial.print(",");
+    Serial.print(servoAngle);
+    Serial.print(",");
+    Serial.print(simulatedBattery);
+    Serial.print(",");
+    Serial.println(brakePressed ? 1 : 0);
+  }
 }
